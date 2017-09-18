@@ -180,7 +180,7 @@ namespace
 
 			if (status < 0)
 			{
-				std::cout << "Connect failed" << std::endl;
+				//std::cout << "Connect failed" << std::endl;
 				self->startSendReq();
 				return;
 			}
@@ -253,7 +253,6 @@ namespace
 		size_t m_readBufSize = 0;
 
 		std::function<void(TestConnection& conn, bool)> m_callBack;
-
 	};
 	std::atomic<int64_t> TestConnection::reqCounter(0);
 	using TestConnectionList = std::list<TestConnection>;
@@ -321,12 +320,6 @@ namespace
 		return ret;
 	}
 
-	void idle(uv_idle_t *)
-	{
-		//using ms = std::chrono::milliseconds;
-		//std::this_thread::sleep_for(ms(5));
-	}
-
 	struct AsyncTestReq
 	{
 		TestConnection* conn;
@@ -363,10 +356,6 @@ namespace
 	{
 		auto loop = new uv_loop_t;
 		uv_loop_init(loop);
-
-//		uv_idle_t idler;
-//		uv_idle_init(loop, &idler);
-//		uv_idle_start(&idler, idle);
 
 		for (auto& conn : conns)
 		{
@@ -421,9 +410,6 @@ int main(int argc, char* argv[])
 	std::thread(&statThread).detach();
 
 	auto loop = uv_default_loop();
-	//uv_idle_t idler;
-	//uv_idle_init(loop, &idler);
-	//uv_idle_start(&idler, idle);
 
 	auto conns = makeConnections(opts.addrs, opts.connCount, loop);
 	std::thread([&conns] {
