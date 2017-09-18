@@ -83,7 +83,9 @@ namespace
 			m_wrireUVReq.data = this;
 			m_readUVReq.data = this;
 
-			m_respParser.setOnMessageCb(std::bind(&TestConnection::onReqCompete, this));
+			m_respParser.setOnMessageCb([this] {
+				this->onReqCompete(true);
+			});
 
 			m_req = "GET /hello HTTP/1.1\r\n"
 				"Host: " + addr + "\r\n"
@@ -96,8 +98,9 @@ namespace
 		{
 		}
 
-		void start()
+		void sendTestReq(std::function<void(TestConnection& conn, bool)> callback)
 		{
+			m_callBack = callback;
 			this->startSendReq();
 		}
 
@@ -105,19 +108,14 @@ namespace
 		static std::atomic<int64_t> reqCounter;
 
 	private:
-		void startSendReq(bool reconnect = true)
+		void startSendReq()
 		{
 			m_respParser.reset();
 
-			if (reconnect)
-			{
-				if (m_sock == nullptr)
-					this->startConnect();
-				else
-					this->startClose();
-			}
+			if (m_sock == nullptr)
+				this->startConnect();
 			else
-				this->startWrite();
+				this->startClose();
 		}
 
 		void startConnect()
@@ -143,12 +141,18 @@ namespace
 			uv_close(handle, &TestConnection::onClosed);
 		}
 
-		void onReqCompete()
+		void onReqCompete(bool success)
 		{
-			if (m_respParser.statusCode() == 200)
-				++reqCounter;
+			auto stream = reinterpret_cast<uv_stream_t*>(m_sock);
+			//uv_read_stop(stream);
 
-			this->startSendReq(false);
+			if (success && m_respParser.statusCode() == 200)
+			{
+				++reqCounter;
+				m_callBack(*this, true);
+			}
+			else
+				m_callBack(*this, false);
 		}
 
 		void startWrite()
@@ -190,7 +194,7 @@ namespace
 			if (status < 0)
 			{
 				std::cout << "send req failed" << std::endl;
-				self->startSendReq();
+				self->startClose();
 				return;
 			}
 
@@ -202,7 +206,7 @@ namespace
 			TestConnection* self = reinterpret_cast<TestConnection*>(stream->data);
 			if (nread <= 0)
 			{
-				self->startSendReq();
+				self->startClose();
 				return;
 			}
 
@@ -215,7 +219,7 @@ namespace
 			delete self->m_sock;
 			self->m_sock = nullptr;
 
-			self->startSendReq();
+			self->onReqCompete(false);
 		}
 
 		static void allocBufCb(uv_handle_t* handle, size_t suggestedSize, uv_buf_t* buf)
@@ -247,6 +251,8 @@ namespace
 
 		void* m_readBuf = nullptr;
 		size_t m_readBufSize = 0;
+
+		std::function<void(TestConnection& conn, bool)> m_callBack;
 
 	};
 	std::atomic<int64_t> TestConnection::reqCounter(0);
@@ -315,6 +321,69 @@ namespace
 		return ret;
 	}
 
+	void idle(uv_idle_t *)
+	{
+		//using ms = std::chrono::milliseconds;
+		//std::this_thread::sleep_for(ms(5));
+	}
+
+	struct AsyncTestReq
+	{
+		TestConnection* conn;
+		uv_async_t asyncTestReqStart;
+		uv_async_t asyncTestReqFinished;
+	};
+
+
+	void asyncTestReqFinished(uv_async_t* handle);
+
+	void asyncSendTestReq(uv_async_t* handle)
+	{
+		auto& asyncReq = *reinterpret_cast<AsyncTestReq*>(handle->data);
+
+		asyncReq.conn->sendTestReq([&asyncReq, handle](TestConnection&, bool) {
+
+			uv_async_init(asyncReq.asyncTestReqFinished.loop, &asyncReq.asyncTestReqFinished, &asyncTestReqFinished);
+			asyncReq.asyncTestReqFinished.data = &asyncReq;
+
+			uv_async_send(&asyncReq.asyncTestReqFinished);
+		});
+	}
+
+	void asyncTestReqFinished(uv_async_t* handle)
+	{
+		auto& asyncReq = *reinterpret_cast<AsyncTestReq*>(handle->data);
+
+		uv_async_init(uv_default_loop(), &asyncReq.asyncTestReqStart, asyncSendTestReq);
+		asyncReq.asyncTestReqStart.data = &asyncReq;
+		uv_async_send(&asyncReq.asyncTestReqStart);
+	}
+
+	void reqThread(TestConnectionList& conns)
+	{
+		auto loop = new uv_loop_t;
+		uv_loop_init(loop);
+
+//		uv_idle_t idler;
+//		uv_idle_init(loop, &idler);
+//		uv_idle_start(&idler, idle);
+
+		for (auto& conn : conns)
+		{
+			auto asyncReq = new AsyncTestReq;
+			asyncReq->conn = &conn;
+			uv_async_init(uv_default_loop(), &asyncReq->asyncTestReqStart, asyncSendTestReq);
+			asyncReq->asyncTestReqStart.data = asyncReq;
+
+			uv_async_init(loop, &asyncReq->asyncTestReqFinished, &asyncTestReqFinished);
+			asyncReq->asyncTestReqFinished.data = &conn;
+
+			uv_async_send(&asyncReq->asyncTestReqStart);
+		}
+
+		for (;;)
+			uv_run(loop, UV_RUN_DEFAULT);
+	}
 
 	struct ProgramOpts
 	{
@@ -352,10 +421,16 @@ int main(int argc, char* argv[])
 	std::thread(&statThread).detach();
 
 	auto loop = uv_default_loop();
+	//uv_idle_t idler;
+	//uv_idle_init(loop, &idler);
+	//uv_idle_start(&idler, idle);
 
 	auto conns = makeConnections(opts.addrs, opts.connCount, loop);
-	for (auto& conn : conns)
-		conn.start();
+	std::thread([&conns] {
+		reqThread(conns);
+	}).detach();
 
-	return uv_run(loop, UV_RUN_DEFAULT);
+	for (;;)
+		uv_run(loop, UV_RUN_DEFAULT);
 }
+
