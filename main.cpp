@@ -115,7 +115,7 @@ namespace
 			if (m_sock == nullptr)
 				this->startConnect();
 			else
-				this->startClose();
+				this->startWrite();
 		}
 
 		void startConnect()
@@ -181,7 +181,8 @@ namespace
 			if (status < 0)
 			{
 				//std::cout << "Connect failed" << std::endl;
-				self->startSendReq();
+				self->startClose();
+				//self->startSendReq();
 				return;
 			}
 
@@ -320,11 +321,13 @@ namespace
 		return ret;
 	}
 
+	constexpr size_t N = 1;
 	struct AsyncTestReq
 	{
 		TestConnection* conn;
-		uv_async_t asyncTestReqStart;
-		uv_async_t asyncTestReqFinished;
+		uv_async_t asyncTestReqStart[N];
+		uv_async_t asyncTestReqFinished[N];
+		size_t n = 0;
 	};
 
 
@@ -333,23 +336,17 @@ namespace
 	void asyncSendTestReq(uv_async_t* handle)
 	{
 		auto& asyncReq = *reinterpret_cast<AsyncTestReq*>(handle->data);
+		asyncReq.n = (asyncReq.n + 1) % N;
 
 		asyncReq.conn->sendTestReq([&asyncReq, handle](TestConnection&, bool) {
-
-			uv_async_init(asyncReq.asyncTestReqFinished.loop, &asyncReq.asyncTestReqFinished, &asyncTestReqFinished);
-			asyncReq.asyncTestReqFinished.data = &asyncReq;
-
-			uv_async_send(&asyncReq.asyncTestReqFinished);
+			uv_async_send(&asyncReq.asyncTestReqFinished[asyncReq.n]);
 		});
 	}
 
 	void asyncTestReqFinished(uv_async_t* handle)
 	{
 		auto& asyncReq = *reinterpret_cast<AsyncTestReq*>(handle->data);
-
-		uv_async_init(uv_default_loop(), &asyncReq.asyncTestReqStart, asyncSendTestReq);
-		asyncReq.asyncTestReqStart.data = &asyncReq;
-		uv_async_send(&asyncReq.asyncTestReqStart);
+		uv_async_send(&asyncReq.asyncTestReqStart[asyncReq.n]);
 	}
 
 	void reqThread(TestConnectionList& conns)
@@ -361,13 +358,17 @@ namespace
 		{
 			auto asyncReq = new AsyncTestReq;
 			asyncReq->conn = &conn;
-			uv_async_init(uv_default_loop(), &asyncReq->asyncTestReqStart, asyncSendTestReq);
-			asyncReq->asyncTestReqStart.data = asyncReq;
+			asyncReq->n = 0;
+			for (size_t i = 0; i < N; ++i)
+			{
+				uv_async_init(uv_default_loop(), &asyncReq->asyncTestReqStart[i], asyncSendTestReq);
+				asyncReq->asyncTestReqStart[i].data = asyncReq;
 
-			uv_async_init(loop, &asyncReq->asyncTestReqFinished, &asyncTestReqFinished);
-			asyncReq->asyncTestReqFinished.data = &conn;
+				uv_async_init(loop, &asyncReq->asyncTestReqFinished[i], &asyncTestReqFinished);
+				asyncReq->asyncTestReqFinished[i].data = asyncReq;
+			}
 
-			uv_async_send(&asyncReq->asyncTestReqStart);
+			uv_async_send(&asyncReq->asyncTestReqStart[asyncReq->n]);
 		}
 
 		for (;;)
